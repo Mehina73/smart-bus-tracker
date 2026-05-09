@@ -1,0 +1,97 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <TinyGPS++.h>
+#include <HardwareSerial.h>
+
+// --- الإعدادات ---
+const char* ssid = "Flybox_E456";
+const char* password = "rpxfw3fggii7";
+const char* serverUrl = "http://192.168.1.106:8000/api/update_bus"; 
+String busID = "EC3248F7A608";
+
+TinyGPSPlus gps;
+HardwareSerial GPS_Serial(2);
+
+const int ir1Pin = 32; 
+const int ir2Pin = 33; 
+
+int passengerCount = 0;
+int sequence = 0; 
+unsigned long timeOut = 0; 
+const int timeOutDelay = 2000; 
+unsigned long lastGpsSend = 0; 
+
+void setup() {
+  Serial.begin(115200);
+  GPS_Serial.begin(9600, SERIAL_8N1, 16, 17); 
+  
+  pinMode(ir1Pin, INPUT);
+  pinMode(ir2Pin, INPUT);
+
+  Serial.print("\nConnecting to WiFi");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500); Serial.print(".");
+  }
+  Serial.println("\nWiFi Connected!");
+}
+
+void smartDelay(unsigned long ms) {
+  unsigned long start = millis();
+  do {
+    while (GPS_Serial.available())
+      gps.encode(GPS_Serial.read());
+  } while (millis() - start < ms);
+}
+
+void sendDataToServer() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(serverUrl);
+    http.addHeader("Content-Type", "application/json");
+
+    float lat = gps.location.isValid() ? gps.location.lat() : 0.0;
+    float lng = gps.location.isValid() ? gps.location.lng() : 0.0;
+
+    // تم إضافة gps_source
+    String jsonPayload = "{\"bus_id\":\"" + busID + "\",\"passengers\":" + String(passengerCount) + ",\"lat\":" + String(lat, 6) + ",\"lng\":" + String(lng, 6) + ",\"gps_source\":\"esp32\"}";
+    
+    int responseCode = http.POST(jsonPayload);
+    Serial.print("Sent: "); Serial.println(jsonPayload);
+    http.end();
+  }
+}
+
+void loop() {
+  while (GPS_Serial.available() > 0) {
+    gps.encode(GPS_Serial.read());
+  }
+
+  int ir1State = digitalRead(ir1Pin);
+  int ir2State = digitalRead(ir2Pin);
+
+  if (sequence != 0 && (millis() - timeOut > timeOutDelay)) sequence = 0; 
+
+  if (ir1State == LOW && ir2State == HIGH && sequence == 0) {
+    sequence = 1; timeOut = millis();
+  } else if (ir2State == LOW && ir1State == HIGH && sequence == 0) {
+    sequence = 2; timeOut = millis();
+  }
+
+  if (ir2State == LOW && sequence == 1) {
+    passengerCount++;
+    Serial.println("Enter!");
+    sendDataToServer(); 
+    sequence = 0; smartDelay(700); 
+  } else if (ir1State == LOW && sequence == 2) {
+    if (passengerCount > 0) passengerCount--;
+    Serial.println("Exit!");
+    sendDataToServer(); 
+    sequence = 0; smartDelay(700);   
+  }
+  
+  if (millis() - lastGpsSend > 5000) {
+    sendDataToServer();
+    lastGpsSend = millis();
+  }
+}

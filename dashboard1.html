@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>خريطة المراقبة الحية</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap');
+        body { font-family: 'Tajawal', sans-serif; background-color: #f3f4f6; }
+        #map { height: 500px; width: 100%; border-radius: 12px; z-index: 1; }
+        .bus-icon { font-size: 24px; color: #2563eb; text-shadow: 0 0 5px white; }
+        .pulse { animation: pulse 2s infinite; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+    </style>
+</head>
+<body class="p-4 md:p-8">
+    <div class="max-w-6xl mx-auto">
+        <header class="bg-white p-6 rounded-2xl shadow-sm mb-6 flex justify-between items-center border-b-4 border-blue-500">
+            <div><h1 class="text-2xl font-bold text-gray-800">خريطة المراقبة الحية للأسطول</h1></div>
+            <div class="text-left">
+                <span id="connection-status-badge" class="bg-gray-100 text-gray-500 px-4 py-2 rounded-full text-xs font-bold">
+                    <i class="fa-solid fa-spinner fa-spin ml-1"></i> بانتظار الاتصال...
+                </span>
+            </div>
+        </header>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            <div class="bg-white p-5 rounded-2xl shadow-sm border-r-4 border-blue-500 flex flex-col justify-center">
+                <p class="text-gray-400 text-xs mb-1">الباص المحدد حالياً</p>
+                <p id="bus-code-val" class="text-lg font-bold text-gray-700">بانتظار باص...</p>
+            </div>
+            <div class="bg-white p-5 rounded-2xl shadow-sm border-r-4 border-orange-500 text-center">
+                <p class="text-gray-400 text-xs mb-1">حمولة الباص المحدد</p>
+                <p class="text-3xl font-black text-orange-600"><span id="passengers-val">0</span> <span class="text-lg">راكب</span></p>
+            </div>
+            <div class="bg-white p-5 rounded-2xl shadow-sm border-r-4 border-green-500 flex flex-col justify-center">
+                <p class="text-gray-400 text-xs mb-1">حالة الباص المحدد</p>
+                <p id="last-update" class="text-sm font-bold text-gray-700">غير متصل</p>
+            </div>
+        </div>
+
+        <div class="bg-white p-6 rounded-2xl shadow-lg">
+            <div class="flex flex-wrap justify-center gap-3 mb-6">
+                <button id="request-btn" onclick="togglePickupRequest()" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-full shadow-md transition opacity-50 cursor-not-allowed" disabled>
+                    <i class="fa-solid fa-hand-wave mr-2"></i> حدد باصاً لطلب الركوب
+                </button>
+
+                <button id="track-btn" onclick="cycleNextBus()" class="bg-gray-800 hover:bg-black text-white font-bold py-3 px-8 rounded-full shadow-md transition">
+                    <i class="fa-solid fa-crosshairs mr-2"></i> تتبع الباصات (التالي)
+                </button>
+
+                <button id="dist-btn" onclick="toggleDistanceLine()" class="bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-8 rounded-full shadow-md transition hidden">
+                    <i class="fa-solid fa-route mr-2"></i> كم يبعد هذا الباص عني؟
+                </button>
+            </div>
+
+            <p id="pickup-status" class="text-xs text-center text-gray-500 mb-2 h-4"></p>
+            <div id="map" class="border border-gray-100 shadow-inner"></div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <script>
+        // إعدادات الاتصال بالسيرفر
+        const BROKER = 'wss://987a13e793ba4872bf72241d3f11ab25.s1.eu.hivemq.cloud:8884/mqtt'; // ⚠️ ضع رابطك
+        const options = { username: 'mehina', password: 'mehina1M' };
+        const client = mqtt.connect(BROKER, options);
+
+        let map = L.map('map').setView([30.8339, 28.9151], 14); // العلمين الجديدة
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+        
+        let busIcon = L.divIcon({ html: '<i class="fa-solid fa-bus bus-icon"></i>', className: 'custom-div-icon', iconSize: [30, 30], iconAnchor: [15, 15] });
+        let passengerIcon = L.divIcon({ html: '<i class="fa-solid fa-person-walking text-orange-500 text-2xl animate-bounce drop-shadow-md"></i>', className: 'custom-div-icon', iconSize: [25, 25], iconAnchor: [12, 12] });
+        
+        // ==========================================
+        // 💡 هياكل بيانات الأسطول (الجديد)
+        // ==========================================
+        let fleet = {}; // قاموس يحمل بيانات وماركرات كل الباصات
+        let allRequests = {}; // طلبات الركاب مقسمة لكل باص
+        let passengerMarkers = {}; // ماركرات الركاب المرسومة حالياً
+        
+        let selectedBusId = null; // كود الباص المحدد حالياً على الشاشة
+        
+        // متغيرات حالة الراكب الخاصة
+        let userLocation = null; 
+        let distanceLine = null; 
+        let showLine = false;    
+        let isRequested = false; 
+        let myPassengerId = null;
+        let myTargetBusId = null; // الباص الذي قمت بطلبه ليتم ربط السيشن به
+
+        // ==========================================
+        // نظام السيشن
+        // ==========================================
+        function loadSession() {
+            const savedId = localStorage.getItem('bus_passenger_id');
+            const targetBus = localStorage.getItem('bus_target_bus_id');
+            if (savedId && targetBus) {
+                myPassengerId = savedId;
+                myTargetBusId = targetBus;
+                const lat = parseFloat(localStorage.getItem('bus_user_lat'));
+                const lng = parseFloat(localStorage.getItem('bus_user_lng'));
+                userLocation = L.latLng(lat, lng);
+                isRequested = true;
+
+                updateRequestButtonUI(true);
+            }
+        }
+
+        function clearSessionUI() {
+            localStorage.removeItem('bus_passenger_id');
+            localStorage.removeItem('bus_user_lat');
+            localStorage.removeItem('bus_user_lng');
+            localStorage.removeItem('bus_target_bus_id');
+            
+            isRequested = false;
+            userLocation = null;
+            myPassengerId = null;
+            myTargetBusId = null;
+
+            if (showLine) toggleDistanceLine(); 
+            document.getElementById("dist-btn").classList.add("hidden");
+            updateRequestButtonUI(false);
+        }
+
+        function updateRequestButtonUI(requested) {
+            const reqBtn = document.getElementById("request-btn");
+            if (requested) {
+                reqBtn.innerHTML = '<i class="fa-solid fa-xmark mr-2"></i> إلغاء طلبي';
+                reqBtn.className = "bg-red-500 hover:bg-red-600 text-white font-bold py-3 px-8 rounded-full shadow-md transition";
+                reqBtn.disabled = false;
+                document.getElementById("dist-btn").classList.remove("hidden");
+            } else {
+                reqBtn.innerHTML = '<i class="fa-solid fa-hand-wave mr-2"></i> أنا هنا! أريد ركوب هذا الباص';
+                reqBtn.className = "bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-8 rounded-full shadow-md transition";
+                
+                // تفعيل الزر فقط إذا كان هناك باص محدد ونشط
+                if(selectedBusId && fleet[selectedBusId] && fleet[selectedBusId].data.active) {
+                    reqBtn.disabled = false;
+                    reqBtn.classList.remove("opacity-50", "cursor-not-allowed");
+                } else {
+                    reqBtn.disabled = true;
+                    reqBtn.classList.add("opacity-50", "cursor-not-allowed");
+                    reqBtn.innerHTML = '<i class="fa-solid fa-hand-wave mr-2"></i> حدد باصاً لطلب الركوب';
+                }
+            }
+        }
+
+        loadSession();
+
+        // ==========================================
+        // الاستقبال والتزامن (أسطول كامل)
+        // ==========================================
+        client.on('connect', () => {
+            document.getElementById('connection-status-badge').innerHTML = '<i class="fa-solid fa-circle text-[8px] ml-1"></i> متصل ومؤمن';
+            document.getElementById('connection-status-badge').className = "bg-green-100 text-green-700 px-4 py-2 rounded-full text-xs font-bold pulse";
+            
+            // 💡 الاشتراك عبر البدل (Wildcards) لاستقبال بيانات أي باص
+            client.subscribe('bus/+/state');
+            client.subscribe('bus/+/active_requests'); 
+        });
+
+        client.on('message', (topic, message) => {
+            const data = JSON.parse(message.toString());
+            const topicParts = topic.split('/');
+            const busId = topicParts[1]; // استخراج كود الباص من المسار
+            const msgType = topicParts[2]; // نوع الرسالة (state أو active_requests)
+
+            if (msgType === 'state') {
+                // تسجيل الباص في الأسطول إذا لم يكن موجوداً
+                if (!fleet[busId]) fleet[busId] = { marker: null, data: data };
+                fleet[busId].data = data;
+
+                // تحديث الخريطة والماركرات
+                if (data.active && data.lat !== 0 && data.lng !== 0) {
+                    if (!fleet[busId].marker) {
+                        fleet[busId].marker = L.marker([data.lat, data.lng], {icon: busIcon, zIndexOffset: 1000})
+                            .addTo(map)
+                            .on('click', () => { focusOnBus(busId); }); // الضغط على الباص يجعله "المحدد"
+                    } else {
+                        fleet[busId].marker.setLatLng([data.lat, data.lng]);
+                    }
+                    fleet[busId].marker.bindPopup(`<b>باص ${busId}</b><br>الركاب: ${data.passengers}`);
+                } else {
+                    if (fleet[busId].marker) { map.removeLayer(fleet[busId].marker); fleet[busId].marker = null; }
+                }
+
+                // اختيار تلقائي لأول باص يظهر إذا لم يكن هناك باص محدد
+                if (!selectedBusId && data.active && data.lat !== 0) {
+                    focusOnBus(busId);
+                }
+
+                // تحديث الكروت العلوية إذا كانت الرسالة تخص الباص المحدد حالياً
+                if (selectedBusId === busId) {
+                    updateUICards(busId);
+                    updateDistanceUI();
+                }
+            }
+            
+            else if (msgType === 'active_requests') {
+                allRequests[busId] = data; // تخزين طلبات هذا الباص
+                redrawAllPassengerMarkers();
+
+                // التحقق من التزامن العكسي (إذا مسح السائق الراكب)
+                if (isRequested && myPassengerId && myTargetBusId === busId) {
+                    const stillExists = data.some(req => req.id === myPassengerId);
+                    if (!stillExists) {
+                        clearSessionUI();
+                        const statusLabel = document.getElementById("pickup-status");
+                        statusLabel.innerText = "🎉 تم صعودك للباص! نتمنى لك رحلة سعيدة.";
+                        statusLabel.className = "text-xs text-green-600 font-bold text-center mb-2";
+                        setTimeout(() => { statusLabel.innerText = ""; }, 5000);
+                    }
+                }
+            }
+        });
+
+        // ==========================================
+        // وظائف الواجهة والتفاعل
+        // ==========================================
+
+        // التركيز على باص معين وتحديث الـ UI
+        function focusOnBus(id) {
+            selectedBusId = id;
+            updateUICards(id);
+            if(!isRequested) updateRequestButtonUI(false); 
+            
+            if (fleet[id] && fleet[id].marker) {
+                map.flyTo(fleet[id].marker.getLatLng(), 15, { animate: true, duration: 1.0 });
+                fleet[id].marker.openPopup();
+                if(showLine) updateDistanceUI();
+            }
+        }
+
+        // تحديث الكروت العلوية (Dashboard Cards)
+        function updateUICards(id) {
+            if (!fleet[id]) return;
+            const data = fleet[id].data;
+            
+            document.getElementById('bus-code-val').innerText = id;
+            document.getElementById('passengers-val').innerText = data.passengers;
+            
+            const lastUpdate = document.getElementById('last-update');
+            if (data.active) {
+                lastUpdate.innerText = new Date().toLocaleTimeString('ar-EG');
+                lastUpdate.className = "text-sm font-bold text-green-600";
+            } else {
+                lastUpdate.innerText = "الرحلة متوقفة";
+                lastUpdate.className = "text-sm font-bold text-red-500";
+            }
+        }
+
+        // الدوران بين الباصات (التالي)
+        function cycleNextBus() {
+            const activeBusIds = Object.keys(fleet).filter(id => fleet[id].data.active && fleet[id].data.lat !== 0);
+            
+            if (activeBusIds.length === 0) {
+                alert("لا توجد باصات نشطة حالياً في الأسطول.");
+                return;
+            }
+
+            let currentIndex = activeBusIds.indexOf(selectedBusId);
+            let nextIndex = (currentIndex + 1) % activeBusIds.length; // لف المؤشر
+            
+            focusOnBus(activeBusIds[nextIndex]);
+        }
+
+        // إعادة رسم جميع الركاب لكل الباصات
+        function redrawAllPassengerMarkers() {
+            Object.values(passengerMarkers).forEach(m => map.removeLayer(m));
+            passengerMarkers = {};
+
+            Object.values(allRequests).forEach(busRequests => {
+                busRequests.forEach(req => {
+                    const pMarker = L.marker([req.lat, req.lng], {icon: passengerIcon}).addTo(map);
+                    pMarker.bindPopup(`<b>راكب ينتظر</b><br>الوقت: ${req.time}`);
+                    passengerMarkers[req.id] = pMarker;
+                });
+            });
+        }
+
+        // ==========================================
+        // وظائف الطلب والمسافة (تعمل على الباص المحدد)
+        // ==========================================
+
+        function togglePickupRequest() {
+            const statusLabel = document.getElementById("pickup-status");
+
+            if (isRequested) {
+                // إلغاء الطلب من الباص الذي تم اختياره مسبقاً
+                if (myPassengerId && myTargetBusId) {
+                    client.publish(`bus/${myTargetBusId}/control`, JSON.stringify({action: "remove_passenger", id: myPassengerId}));
+                }
+                clearSessionUI();
+                statusLabel.innerText = "تم إلغاء طلب الركوب وإخفاء موقعك.";
+                statusLabel.className = "text-xs text-gray-500 font-bold text-center mb-2";
+                setTimeout(() => { if(!isRequested) statusLabel.innerText = ""; }, 3000);
+                return;
+            }
+
+            if (!selectedBusId || !fleet[selectedBusId] || !fleet[selectedBusId].data.active) {
+                alert("يرجى تتبع باص نشط أولاً لطلب ركوبه.");
+                return;
+            }
+
+            statusLabel.innerText = "جاري تحديد موقعك...";
+            statusLabel.className = "text-xs text-blue-500 mt-2 font-bold pulse text-center";
+            
+            if (navigator.geolocation) {
+                navigator.geolocation.getCurrentPosition(position => {
+                    userLocation = L.latLng(position.coords.latitude, position.coords.longitude);
+		       map.flyTo([userLocation.lat, userLocation.lng], 17, {animate: true, duration: 1.5 });
+                    const timeStr = new Date().toLocaleTimeString('ar-EG');
+                    myTargetBusId = selectedBusId; // تثبيت الباص المستهدف
+                    
+                    const reqData = { lat: userLocation.lat, lng: userLocation.lng, time: timeStr };
+                    myPassengerId = timeStr + userLocation.lat; 
+                    
+                    // 💡 إرسال الطلب لقناة الباص المحدد فقط
+                    client.publish(`bus/${myTargetBusId}/requests`, JSON.stringify(reqData));
+                    
+                    // حفظ السيشن
+                    localStorage.setItem('bus_passenger_id', myPassengerId);
+                    localStorage.setItem('bus_user_lat', userLocation.lat);
+                    localStorage.setItem('bus_user_lng', userLocation.lng);
+                    localStorage.setItem('bus_target_bus_id', myTargetBusId);
+                    
+                    isRequested = true;
+                    updateRequestButtonUI(true);
+                    
+                    statusLabel.innerText = `✅ تم إرسال موقعك لباص (${myTargetBusId})!`;
+                    statusLabel.className = "text-xs text-green-600 font-bold text-center mb-2";
+                    setTimeout(() => { statusLabel.innerText = ""; }, 4000);
+                }, () => {
+                    alert("يرجى تفعيل الـ GPS لإرسال طلب الركوب.");
+                    statusLabel.innerText = "";
+                });
+            } else {
+                alert("متصفحك لا يدعم هذه الخاصية.");
+            }
+        }
+
+        function toggleDistanceLine() {
+            // المسافة تحسب بين الراكب والباص الذي طلبه (أو الباص المحدد إذا لم يطلب بعد)
+            const targetBus = isRequested ? myTargetBusId : selectedBusId;
+            
+            if (!userLocation || !targetBus || !fleet[targetBus] || !fleet[targetBus].marker) {
+                alert("الباص المطلوب غير متاح حالياً لحساب المسافة.");
+                return;
+            }
+
+            showLine = !showLine;
+            const btn = document.getElementById("dist-btn");
+
+            if (showLine) {
+                updateDistanceUI();
+                btn.innerHTML = '<i class="fa-solid fa-eye-slash mr-2"></i> إخفاء الخط';
+                btn.className = "bg-orange-500 hover:bg-orange-600 text-white font-bold py-3 px-8 rounded-full shadow-md transition";
+            } else {
+                if (distanceLine) map.removeLayer(distanceLine);
+                btn.innerHTML = '<i class="fa-solid fa-route mr-2"></i> كم يبعد هذا الباص عني؟';
+                btn.className = "bg-green-600 hover:bg-green-700 text-white font-bold py-3 px-8 rounded-full shadow-md transition";
+            }
+        }
+
+        function updateDistanceUI() {
+            const targetBus = isRequested ? myTargetBusId : selectedBusId;
+            
+            if (!showLine || !userLocation || !targetBus || !fleet[targetBus] || !fleet[targetBus].marker) return;
+
+            const busLatLng = fleet[targetBus].marker.getLatLng();
+            const distance = userLocation.distanceTo(busLatLng); 
+            const km = (distance / 1000).toFixed(2);
+            
+            const speedMetersPerMin = 333;
+            const timeMins = Math.max(1, Math.round(distance / speedMetersPerMin));
+
+            if (distanceLine) map.removeLayer(distanceLine);
+            distanceLine = L.polyline([userLocation, busLatLng], {
+                color: '#2563eb', weight: 4, opacity: 0.8, dashArray: '10, 10', lineJoin: 'round'
+            }).addTo(map);
+
+            distanceLine.bindTooltip(`
+                <div class="text-center border-r-4 border-blue-500 pr-2">
+                        <div class="text-gray-500 text-[10px]">المسافة عن باص BUS-01:</div>
+    <b class="text-blue-600">0.00 كم</b><br>
+                    <span class="text-gray-500 text-[10px]">يصل خلال:</span> <b class="text-green-600">~1 دقيقة</b>
+                </div>
+            `, { permanent: true, direction: 'center', className: 'bg-white p-2 rounded-lg shadow-lg text-xs' }).openTooltip();
+        }
+    </script>
+</body>
+</html>

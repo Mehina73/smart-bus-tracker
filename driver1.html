@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>تطبيق السائق الذكي</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700&display=swap');
+        body { font-family: 'Tajawal', sans-serif; background-color: #f9fafb; }
+        .pulse { animation: pulse 2s infinite; }
+        @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+    </style>
+</head>
+<body class="p-4 flex flex-col items-center justify-center min-h-screen">
+
+    <div class="w-full max-w-sm bg-white rounded-3xl shadow-xl overflow-hidden border border-gray-100">
+        
+        <div id="login-section" class="p-8 text-center">
+            <i class="fa-solid fa-bus text-6xl text-blue-600 mb-6 drop-shadow-md"></i>
+            <h2 class="text-2xl font-bold mb-2 text-gray-800">بوابة السائقين</h2>
+            <p class="text-xs text-gray-500 mb-8">أدخل كود الباص المخصص لك لبدء رحلتك</p>
+            
+            <input type="text" id="bus-id-input" placeholder="مثال: BUS-01" class="w-full p-4 border-2 border-gray-200 rounded-2xl mb-6 text-center text-lg font-bold text-blue-600 focus:outline-none focus:border-blue-500 uppercase">
+            
+            <button onclick="loginDriver()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-2xl shadow-lg transition duration-300">
+                تسجيل الدخول <i class="fa-solid fa-arrow-left mr-2"></i>
+            </button>
+        </div>
+
+        <div id="dashboard-section" class="hidden">
+            <div class="bg-blue-600 p-6 text-center text-white relative">
+                <button onclick="logoutDriver()" class="absolute top-4 left-4 text-blue-200 hover:text-white transition" title="تسجيل خروج">
+                    <i class="fa-solid fa-right-from-bracket text-xl"></i>
+                </button>
+                
+                <i class="fa-solid fa-bus-simple text-5xl mb-3 drop-shadow-md"></i>
+                <h1 class="text-2xl font-bold mb-1">لوحة السائق</h1>
+                <p id="display-bus-id" class="text-blue-200 text-sm font-mono">الباص: ...</p>
+            </div>
+
+            <div class="p-6">
+                <div class="flex justify-between items-center mb-6 bg-gray-50 p-4 rounded-2xl border border-gray-100">
+                    <div>
+                        <p class="text-xs text-gray-500 font-bold mb-1">الركاب بالداخل</p>
+                        <p class="text-4xl font-black text-gray-800" id="passenger-count">0</p>
+                    </div>
+                    <button onclick="resetPassengers()" class="bg-red-50 hover:bg-red-100 text-red-500 p-3 rounded-xl transition">
+                        <i class="fa-solid fa-rotate-right"></i> تصفير
+                    </button>
+                </div>
+
+                <div class="flex items-center mb-6 bg-blue-50 p-3 rounded-xl border border-blue-100">
+                    <input type="checkbox" id="use-phone-gps" checked class="w-5 h-5 text-blue-600 rounded focus:ring-blue-500">
+                    <label for="use-phone-gps" class="mr-3 text-sm font-bold text-blue-800">تفعيل GPS الهاتف (أعلى دقة)</label>
+                </div>
+
+                <button id="track-btn" onclick="toggleTracking()" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-2xl shadow-lg transition duration-300 mb-4">
+                    <i id="btn-icon" class="fa-solid fa-play mr-2"></i> <span id="btn-text">بدء الرحلة (تفعيل النظام)</span>
+                </button>
+
+                <div class="text-center bg-gray-50 p-3 rounded-xl border border-gray-100">
+                    <p id="status-text" class="text-xs font-bold text-gray-500 mb-1">النظام متوقف.</p>
+                    <p id="coords-text" class="text-[10px] text-gray-400 font-mono"></p>
+                </div>
+
+                <div class="mt-6 pt-4 border-t border-gray-100">
+                    <h3 class="text-sm font-bold text-gray-700 mb-3"><i class="fa-solid fa-bell text-yellow-500"></i> طلبات الركوب:</h3>
+                    <div id="requests-container" class="space-y-2">
+                        <p id="no-requests" class="text-xs text-gray-400 text-center">لا توجد طلبات حالياً.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <script>
+        // إعدادات الاتصال بالسيرفر
+        const BROKER = 'wss://987a13e793ba4872bf72241d3f11ab25.s1.eu.hivemq.cloud:8884/mqtt'; // ⚠️ ضع رابطك هنا
+        const options = { username: 'mehina', password: 'mehina1M' };
+        
+        let client = null;
+        let myBusId = null; // سيتم تحديده عند تسجيل الدخول
+        let trackingId = null;
+        let isTracking = false;
+
+        // ==========================================
+        // 💡 نظام سيشن السائق (Login / Logout)
+        // ==========================================
+        function checkSession() {
+            const savedId = localStorage.getItem('bus_driver_id');
+            if (savedId) {
+                myBusId = savedId;
+                showDashboard();
+            }
+        }
+
+        function loginDriver() {
+            const inputVal = document.getElementById('bus-id-input').value.trim().toUpperCase();
+            if (!inputVal) {
+                alert("يرجى إدخال كود الباص أولاً!");
+                return;
+            }
+            myBusId = inputVal;
+            localStorage.setItem('bus_driver_id', myBusId);
+            showDashboard();
+        }
+
+        function logoutDriver() {
+            if (isTracking) toggleTracking(); // إنهاء الرحلة إن كانت تعمل
+            localStorage.removeItem('bus_driver_id');
+            myBusId = null;
+            if (client) {
+                client.end(); // قطع الاتصال بالسيرفر
+                client = null;
+            }
+            document.getElementById('dashboard-section').classList.add('hidden');
+            document.getElementById('login-section').classList.remove('hidden');
+        }
+
+        function showDashboard() {
+            document.getElementById('login-section').classList.add('hidden');
+            document.getElementById('dashboard-section').classList.remove('hidden');
+            document.getElementById('display-bus-id').innerText = `الباص: ${myBusId}`;
+            
+            // بدء الاتصال بـ MQTT فور تسجيل الدخول الناجح
+            connectMQTT();
+        }
+
+        // ==========================================
+        // الاتصال الديناميكي بـ MQTT
+        // ==========================================
+        function connectMQTT() {
+            if (client) return; // منع التكرار
+            
+            client = mqtt.connect(BROKER, options);
+
+            client.on('connect', () => {
+                console.log(`✅ متصل بالسيرفر كباص: ${myBusId}`);
+                // 💡 الاشتراك في قنوات هذا الباص فقط!
+                client.subscribe(`bus/${myBusId}/state`);
+                client.subscribe(`bus/${myBusId}/active_requests`);
+            });
+
+            client.on('message', (topic, message) => {
+                const data = JSON.parse(message.toString());
+                
+                if(topic === `bus/${myBusId}/state`) {
+                    if(data.active) document.getElementById("passenger-count").innerText = data.passengers;
+                } 
+                else if (topic === `bus/${myBusId}/active_requests`) {
+                    const container = document.getElementById("requests-container");
+                    container.innerHTML = ""; 
+                    
+                    if (data.length === 0) {
+                        container.innerHTML = '<p class="text-xs text-gray-400 text-center">لا توجد طلبات حالياً.</p>';
+                        return;
+                    }
+
+                    data.reverse().forEach(req => {
+                        const card = document.createElement("div");
+                        card.className = "bg-orange-50 border-r-4 border-orange-500 p-3 rounded-xl shadow-sm flex justify-between items-center";
+                        card.innerHTML = `
+                            <div>
+                                <p class="text-xs font-bold text-gray-800">راكب في الانتظار</p>
+                                <p class="text-[10px] text-gray-500">${req.time}</p>
+                            </div>
+                            <div class="flex gap-2">
+                                <a href="https://www.google.com/maps/dir/?api=1&destination=${req.lat},${req.lng}" target="_blank" class="bg-blue-500 hover:bg-blue-600 text-white p-2 rounded-lg text-xs font-bold shadow transition">
+                                    <i class="fa-solid fa-location-arrow"></i> توجيه
+                                </a>
+                                <button onclick="clearRequest('${req.id}')" class="bg-green-500 hover:bg-green-600 text-white p-2 rounded-lg text-xs font-bold shadow transition">
+                                    <i class="fa-solid fa-check"></i> ركب
+                                </button>
+                            </div>
+                        `;
+                        container.appendChild(card);
+                    });
+                }
+            });
+        }
+
+        // ==========================================
+        // دوال التحكم وإرسال الأوامر (ديناميكية)
+        // ==========================================
+        function clearRequest(id) {
+            client.publish(`bus/${myBusId}/control`, JSON.stringify({ action: "remove_passenger", id: id }));
+        }
+
+        function toggleTracking() {
+            const btn = document.getElementById("track-btn");
+            const btnText = document.getElementById("btn-text");
+            const busIcon = document.getElementById("btn-icon");
+            const statusText = document.getElementById("status-text");
+            const usePhoneGps = document.getElementById("use-phone-gps").checked;
+
+            if (!isTracking) {
+                client.publish(`bus/${myBusId}/control`, JSON.stringify({action: "start"}));
+                isTracking = true;
+                
+                btn.className = "w-full bg-red-500 text-white font-bold py-4 rounded-2xl shadow-lg mb-4 pulse";
+                btnText.innerText = "إنهاء الرحلة";
+                busIcon.className = "fa-solid fa-stop";
+                
+                if (usePhoneGps && navigator.geolocation) {
+                    trackingId = navigator.geolocation.watchPosition(sendPosition, showError, { enableHighAccuracy: true });
+                    statusText.innerText = "يعمل.. إرسال الـ GPS من الهاتف";
+                    statusText.className = "text-xs font-bold text-green-600 mb-1";
+                } else {
+                    statusText.innerText = "يعمل.. الاعتماد على بوردة الباص";
+                    statusText.className = "text-xs font-bold text-green-600 mb-1";
+                }
+            } else {
+                if(trackingId) navigator.geolocation.clearWatch(trackingId);
+                isTracking = false;
+                
+                client.publish(`bus/${myBusId}/control`, JSON.stringify({action: "stop"}));
+                
+                btn.className = "w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-2xl shadow-lg transition duration-300 mb-4";
+                btnText.innerText = "بدء الرحلة (تفعيل النظام)";
+                busIcon.className = "fa-solid fa-play";
+                document.getElementById("passenger-count").innerText = "0";
+                document.getElementById("coords-text").innerText = "";
+                statusText.innerText = "النظام متوقف.";
+                statusText.className = "text-xs font-bold text-gray-500 mb-1";
+            }
+        }
+
+        function sendPosition(position) {
+            client.publish(`bus/${myBusId}/phone`, JSON.stringify({ 
+                lat: position.coords.latitude, 
+                lng: position.coords.longitude 
+            }));
+            document.getElementById("coords-text").innerText = `${position.coords.latitude.toFixed(5)}, ${position.coords.longitude.toFixed(5)}`;
+        }
+
+        function showError(error) { 
+            document.getElementById("status-text").innerText = "خطأ في قراءة GPS الهاتف"; 
+            document.getElementById("status-text").className = "text-xs font-bold text-red-600 mb-1";
+        }
+
+        function resetPassengers() {
+            if(confirm("هل أنت متأكد من تصفير عداد الركاب؟")) {
+                client.publish(`bus/${myBusId}/control`, JSON.stringify({action: "reset"}));
+                document.getElementById("passenger-count").innerText = "0";
+            }
+        }
+
+        // تشغيل فحص السيشن عند فتح الصفحة
+        checkSession();
+    </script>
+</body>
+</html>
